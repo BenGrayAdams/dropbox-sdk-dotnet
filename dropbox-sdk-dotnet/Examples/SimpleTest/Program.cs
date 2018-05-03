@@ -5,18 +5,30 @@ namespace SimpleTest
     using System.Linq;
     using System.Net;
     using System.Net.Http;
+    using System.Runtime.InteropServices;
     using System.Threading.Tasks;
-    using System.Windows;
 
     using Dropbox.Api;
     using Dropbox.Api.Files;
     using Dropbox.Api.Team;
-    using System.Threading;
 
     partial class Program
     {
-        // Add an ApiKey (from https://www.dropbox.com/developers/apps) here
+        // Add an ApiKey and ApiSecret (from https://www.dropbox.com/developers/apps) here
         // private const string ApiKey = "XXXXXXXXXXXXXXX";
+        // private const string ApiSecret = "XXXXXXXXXXXXXXX";
+
+        // This redirect URL is for demo purpose. If this port is not available on you
+        // machine you need to update this URL with an unused port. Note that you
+        // also need to update the redirect URI field on https://www.dropbox.com/developers/apps.
+        private const string RedirectUri = "http://127.0.0.1:52475/";
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern IntPtr GetConsoleWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
 
         [STAThread]
         static int Main(string[] args)
@@ -148,40 +160,33 @@ namespace SimpleTest
 
             if (string.IsNullOrEmpty(accessToken))
             {
-                Console.WriteLine("Waiting for credentials.");
-                var completion = new TaskCompletionSource<Tuple<string, string>>();
-
-                var thread = new Thread(() =>
-                    {
-                        try
-                        {
-                            var app = new Application();
-                            var login = new LoginForm(ApiKey);
-                            app.Run(login);
-                            if (login.Result)
-                            {
-                                completion.TrySetResult(Tuple.Create(login.AccessToken, login.Uid));
-                            }
-                            else
-                            {
-                                completion.TrySetCanceled();
-                            }
-                        }
-                        catch(Exception e)
-                        {
-                            completion.TrySetException(e);
-                        }
-                    });
-                thread.SetApartmentState(ApartmentState.STA);
-                thread.Start();
-
                 try
                 {
-                    var result = await completion.Task;
+                    Console.WriteLine("Waiting for credentials.");
+                    var state = Guid.NewGuid().ToString("N");
+                    var authorizeUri = DropboxOAuth2Helper.GetAuthorizeUri(OAuthResponseType.Code, ApiKey, new Uri(RedirectUri), state: state);
+                    var http = new HttpListener();
+                    http.Prefixes.Add(RedirectUri);
+
+                    http.Start();
+
+                    System.Diagnostics.Process.Start(authorizeUri.ToString());
+
+                    var context = await http.GetContextAsync();
+                    var result = await DropboxOAuth2Helper.ProcessCodeFlowAsync(
+                        context.Request.Url,
+                        ApiKey,
+                        ApiSecret,
+                        redirectUri: RedirectUri,
+                        state: state);
+
                     Console.WriteLine("and back...");
 
-                    accessToken = result.Item1;
-                    var uid = result.Item2;
+                    // Bring console window to the front.
+                    SetForegroundWindow(GetConsoleWindow());
+
+                    accessToken = result.AccessToken;
+                    var uid = result.Uid;
                     Console.WriteLine("Uid: {0}", uid);
 
                     Settings.Default.AccessToken = accessToken;
@@ -191,7 +196,6 @@ namespace SimpleTest
                 }
                 catch (Exception e)
                 {
-                    e = e.InnerException ?? e;
                     Console.WriteLine("Error: {0}", e.Message);
                     return null;
                 }
